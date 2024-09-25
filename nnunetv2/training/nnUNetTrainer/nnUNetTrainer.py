@@ -423,7 +423,7 @@ class nnUNetTrainer(object):
         #     # now wrap the loss
         #     loss = DeepSupervisionWrapper(loss, weights)
 
-        return nn.MSELoss()
+        return nn.L1Loss()
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
@@ -1036,36 +1036,47 @@ class nnUNetTrainer(object):
     def on_validation_epoch_start(self):
         self.network.eval()
 
+
     def validation_step(self, batch: dict) -> dict:
-        data = batch['data']
+        data = batch['data']  # shape [7, 1, 192, 256, 16]
         target = batch['target']
+        keys = batch['keys']  # keys used for naming files
         csv_df = pd.read_csv("nnUNet_raw/Dataset100_T1/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
         labels = list()
-        
+
         # Get labels for the batch
         for case_name in batch['keys']:
             filtered_df = csv_df[csv_df['case_name'] == case_name]
             labels.append(filtered_df['label'].values[0])
         labels = np.array(labels)
-        
+
         # Move data to the appropriate device
         data = data.to(self.device, non_blocking=True)
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
         else:
             target = target.to(self.device, non_blocking=True)
-        
+
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             # Perform the forward pass and compute the overall loss
-            output = self.network(data)
-            plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 2], cmap='gray')
-            plt.savefig(f'data_epoch{self.current_epoch + 1}')
-            plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 2], cmap='gray')
-            plt.savefig(f'output_epoch{self.current_epoch + 1}')
-            
-            # Compute overall loss
-            l = self.loss(output[0], data)
-        
+            output = self.network(data)  # Assuming output[0] has shape [7, 1, 192, 256, 16]
+
+            # Compute element-wise mean absolute error (MAE) for each instance in the batch
+            mae = torch.abs(output[0] - data).mean(dim=1)  # shape [7, 192, 256, 16]
+
+            # Save the MAE for each instance as a .npy file with the name based on batch['keys']
+            mae_np = mae.detach().cpu().numpy()  # Convert to numpy array
+            output_dir = '/content/error_maps/'  # Root directory to save the error maps
+            os.makedirs(output_dir, exist_ok=True)  # Ensure the directory exists
+
+            # Save each MAE map to a separate file using keys
+            for i in range(mae_np.shape[0]):  # Loop through each batch instance
+                file_name = os.path.join(output_dir, f"{keys[i]}.npy")
+                np.save(file_name, mae_np[i])  # Save the [192, 256, 16] array
+
+            # Continue with the rest of the validation logic...
+            l = self.loss(output[0], data)  # Compute overall loss
+
         # Compute deep supervision if needed
         if self.enable_deep_supervision:
             output = output[0]
@@ -1074,7 +1085,7 @@ class nnUNetTrainer(object):
         # Compute losses for normal (label == 0) and abnormal (label == 1) instances
         normal_indices = np.where(labels == 0)[0]
         abnormal_indices = np.where(labels == 1)[0]
-        
+
         # Select data and target for normal cases and compute their loss
         if len(normal_indices) > 0:
             normal_data = data[normal_indices]
@@ -1093,7 +1104,7 @@ class nnUNetTrainer(object):
 
         # Process the predicted segmentation as before
         axes = [0] + list(range(2, output.ndim))
-        
+
         if self.label_manager.has_regions:
             predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
         else:
