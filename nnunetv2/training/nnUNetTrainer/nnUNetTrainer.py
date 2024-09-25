@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 import numpy as np
+import pandas as pd
 import torch
 from batchgenerators.dataloading.multi_threaded_augmenter import MultiThreadedAugmenter
 from batchgenerators.dataloading.nondet_multi_threaded_augmenter import NonDetMultiThreadedAugmenter
@@ -1038,39 +1039,64 @@ class nnUNetTrainer(object):
     def validation_step(self, batch: dict) -> dict:
         data = batch['data']
         target = batch['target']
-        print(batch.keys())
-
+        csv_df = pd.read_csv("nnUNet_raw/Dataset100_T1/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
+        labels = list()
+        
+        # Get labels for the batch
+        for case_name in batch['keys']:
+            filtered_df = csv_df[csv_df['case_name'] == case_name]
+            labels.append(filtered_df['label'].values[0])
+        labels = np.array(labels)
+        
+        # Move data to the appropriate device
         data = data.to(self.device, non_blocking=True)
         if isinstance(target, list):
             target = [i.to(self.device, non_blocking=True) for i in target]
         else:
             target = target.to(self.device, non_blocking=True)
-
-        # Autocast can be annoying
-        # If the device_type is 'cpu' then it's slow as heck and needs to be disabled.
-        # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
-        # So autocast will only be active if we have a cuda device.
+        
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
+            # Perform the forward pass and compute the overall loss
             output = self.network(data)
             plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 2], cmap='gray')
             plt.savefig(f'data_epoch{self.current_epoch + 1}')
             plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 2], cmap='gray')
             plt.savefig(f'output_epoch{self.current_epoch + 1}')
+            
+            # Compute overall loss
             l = self.loss(output[0], data)
-            # del data
-
-        # we only need the output with the highest output resolution (if DS enabled)
+        
+        # Compute deep supervision if needed
         if self.enable_deep_supervision:
             output = output[0]
             target = target[0]
 
-        # the following is needed for online evaluation. Fake dice (green line)
-        axes = [0] + list(range(2, output.ndim))
+        # Compute losses for normal (label == 0) and abnormal (label == 1) instances
+        normal_indices = np.where(labels == 0)[0]
+        abnormal_indices = np.where(labels == 1)[0]
+        
+        # Select data and target for normal cases and compute their loss
+        if len(normal_indices) > 0:
+            normal_data = data[normal_indices]
+            normal_output = output[normal_indices]
+            l_normal = self.loss(normal_output, normal_data)
+        else:
+            l_normal = torch.tensor(0.0, device=self.device)  # No normal cases, set loss to 0
 
+        # Select data and target for abnormal cases and compute their loss
+        if len(abnormal_indices) > 0:
+            abnormal_data = data[abnormal_indices]
+            abnormal_output = output[abnormal_indices]
+            l_abnormal = self.loss(abnormal_output, abnormal_data)
+        else:
+            l_abnormal = torch.tensor(0.0, device=self.device)  # No abnormal cases, set loss to 0
+
+        # Process the predicted segmentation as before
+        axes = [0] + list(range(2, output.ndim))
+        
         if self.label_manager.has_regions:
             predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
         else:
-            # no need for softmax
             output_seg = output.argmax(1)[:, None]
             predicted_segmentation_onehot = torch.zeros(output.shape, device=output.device, dtype=torch.float32)
             predicted_segmentation_onehot.scatter_(1, output_seg, 1)
@@ -1079,14 +1105,12 @@ class nnUNetTrainer(object):
         if self.label_manager.has_ignore_label:
             if not self.label_manager.has_regions:
                 mask = (target != self.label_manager.ignore_label).float()
-                # CAREFUL that you don't rely on target after this line!
                 target[target == self.label_manager.ignore_label] = 0
             else:
                 if target.dtype == torch.bool:
                     mask = ~target[:, -1:]
                 else:
                     mask = 1 - target[:, -1:]
-                # CAREFUL that you don't rely on target after this line!
                 target = target[:, :-1]
         else:
             mask = None
@@ -1097,15 +1121,19 @@ class nnUNetTrainer(object):
         fp_hard = fp.detach().cpu().numpy()
         fn_hard = fn.detach().cpu().numpy()
         if not self.label_manager.has_regions:
-            # if we train with regions all segmentation heads predict some kind of foreground. In conventional
-            # (softmax training) there needs tobe one output for the background. We are not interested in the
-            # background Dice
-            # [1:] in order to remove background
             tp_hard = tp_hard[1:]
             fp_hard = fp_hard[1:]
             fn_hard = fn_hard[1:]
 
-        return {'loss': l.detach().cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
+        # Return the overall loss, the normal/abnormal losses, and the performance metrics
+        return {
+            'loss': l.detach().cpu().numpy(),
+            'l_normal': l_normal.detach().cpu().numpy(),
+            'l_abnormal': l_abnormal.detach().cpu().numpy(),
+            'tp_hard': tp_hard,
+            'fp_hard': fp_hard,
+            'fn_hard': fn_hard
+        }
 
     def on_validation_epoch_end(self, val_outputs: List[dict]):
         outputs_collated = collate_outputs(val_outputs)
@@ -1128,17 +1156,32 @@ class nnUNetTrainer(object):
             dist.all_gather_object(fns, fn)
             fn = np.vstack([i[None] for i in fns]).sum(0)
 
+            # Gather losses from all devices
             losses_val = [None for _ in range(world_size)]
+            losses_val_normal = [None for _ in range(world_size)]
+            losses_val_abnormal = [None for _ in range(world_size)]
+
             dist.all_gather_object(losses_val, outputs_collated['loss'])
+            dist.all_gather_object(losses_val_normal, outputs_collated['l_normal'])
+            dist.all_gather_object(losses_val_abnormal, outputs_collated['l_abnormal'])
+
             loss_here = np.vstack(losses_val).mean()
+            loss_normal = np.vstack(losses_val_normal).mean()
+            loss_abnormal = np.vstack(losses_val_abnormal).mean()
         else:
             loss_here = np.mean(outputs_collated['loss'])
+            loss_normal = np.mean(outputs_collated['l_normal'])
+            loss_abnormal = np.mean(outputs_collated['l_abnormal'])
 
         global_dc_per_class = [i for i in [2 * i / (2 * i + j + k) for i, j, k in zip(tp, fp, fn)]]
         mean_fg_dice = np.nanmean(global_dc_per_class)
+        
+        # Log the dice scores and losses
         self.logger.log('mean_fg_dice', mean_fg_dice, self.current_epoch)
         self.logger.log('dice_per_class_or_region', global_dc_per_class, self.current_epoch)
         self.logger.log('val_losses', loss_here, self.current_epoch)
+        self.logger.log('val_loss_normal', loss_normal, self.current_epoch)
+        self.logger.log('val_loss_abnormal', loss_abnormal, self.current_epoch)
 
     def on_epoch_start(self):
         self.logger.log('epoch_start_timestamps', time(), self.current_epoch)
@@ -1146,19 +1189,27 @@ class nnUNetTrainer(object):
     def on_epoch_end(self):
         self.logger.log('epoch_end_timestamps', time(), self.current_epoch)
 
+        # Print train loss, val loss, and other metrics
         self.print_to_log_file('train_loss', np.round(self.logger.my_fantastic_logging['train_losses'][-1], decimals=4))
         self.print_to_log_file('val_loss', np.round(self.logger.my_fantastic_logging['val_losses'][-1], decimals=4))
+        self.print_to_log_file('val_loss_normal', np.round(self.logger.my_fantastic_logging['val_loss_normal'][-1], decimals=4))
+        self.print_to_log_file('val_loss_abnormal', np.round(self.logger.my_fantastic_logging['val_loss_abnormal'][-1], decimals=4))
+        
+        # Print pseudo dice
         self.print_to_log_file('Pseudo dice', [np.round(i, decimals=4) for i in
-                                               self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
+                                              self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
+
+        # Print epoch time
         self.print_to_log_file(
             f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
 
-        # handling periodic checkpointing
+        # Checkpoint handling
         current_epoch = self.current_epoch
         if (current_epoch + 1) % self.save_every == 0 and current_epoch != (self.num_epochs - 1):
             self.save_checkpoint(join(self.output_folder, f'checkpoint_{current_epoch + 1}.pth'))
 
-        # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
+        # Handle 'best' checkpointing
+        # Uncomment the following lines if you need to save the best checkpoint based on ema_fg_dice
         # if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
         #     self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
         #     self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
@@ -1168,6 +1219,7 @@ class nnUNetTrainer(object):
             self.logger.plot_progress_png(self.output_folder)
 
         self.current_epoch += 1
+
 
     def save_checkpoint(self, filename: str) -> None:
         if self.local_rank == 0:
@@ -1385,8 +1437,8 @@ class nnUNetTrainer(object):
             self.on_train_epoch_start()
             train_outputs = []
             for batch_id in tqdm(range(self.num_iterations_per_epoch)):
-                if batch_id == 1:
-                      break
+                # if batch_id == 1:
+                #       break
                 train_outputs.append(self.train_step(next(self.dataloader_train)))
             self.on_train_epoch_end(train_outputs)
 
@@ -1394,8 +1446,8 @@ class nnUNetTrainer(object):
                 self.on_validation_epoch_start()
                 val_outputs = []
                 for batch_id in tqdm(range(self.num_val_iterations_per_epoch)):
-                    if batch_id == 1:
-                      break
+                    # if batch_id == 1:
+                    #   break
                     val_outputs.append(self.validation_step(next(self.dataloader_val)))
                 self.on_validation_epoch_end(val_outputs)
 
