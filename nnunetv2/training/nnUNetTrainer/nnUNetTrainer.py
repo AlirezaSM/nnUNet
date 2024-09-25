@@ -8,6 +8,8 @@ from copy import deepcopy
 from datetime import datetime
 from time import time, sleep
 from typing import Tuple, Union, List
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -185,7 +187,7 @@ class nnUNetTrainer(object):
         # self.configure_rotation_dummyDA_mirroring_and_inital_patch_size and will be saved in checkpoints
 
         ### checkpoint saving stuff
-        self.save_every = 50
+        self.save_every = 1
         self.disable_checkpointing = False
 
         ## DDP batch size and oversampling can differ between workers and needs adaptation
@@ -387,40 +389,40 @@ class nnUNetTrainer(object):
             self.oversample_foreground_percent = oversample_percent
 
     def _build_loss(self):
-        if self.label_manager.has_regions:
-            loss = DC_and_BCE_loss({},
-                                   {'batch_dice': self.configuration_manager.batch_dice,
-                                    'do_bg': True, 'smooth': 1e-5, 'ddp': self.is_ddp},
-                                   use_ignore_label=self.label_manager.ignore_label is not None,
-                                   dice_class=MemoryEfficientSoftDiceLoss)
-        else:
-            loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
-                                   'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
-                                  ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
+        # if self.label_manager.has_regions:
+        #     loss = DC_and_BCE_loss({},
+        #                            {'batch_dice': self.configuration_manager.batch_dice,
+        #                             'do_bg': True, 'smooth': 1e-5, 'ddp': self.is_ddp},
+        #                            use_ignore_label=self.label_manager.ignore_label is not None,
+        #                            dice_class=MemoryEfficientSoftDiceLoss)
+        # else:
+        #     loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
+        #                            'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
+        #                           ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientSoftDiceLoss)
 
-        if self._do_i_compile():
-            loss.dc = torch.compile(loss.dc)
+        # if self._do_i_compile():
+        #     loss.dc = torch.compile(loss.dc)
 
-        # we give each output a weight which decreases exponentially (division by 2) as the resolution decreases
-        # this gives higher resolution outputs more weight in the loss
+        # # we give each output a weight which decreases exponentially (division by 2) as the resolution decreases
+        # # this gives higher resolution outputs more weight in the loss
 
-        if self.enable_deep_supervision:
-            deep_supervision_scales = self._get_deep_supervision_scales()
-            weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
-            if self.is_ddp and not self._do_i_compile():
-                # very strange and stupid interaction. DDP crashes and complains about unused parameters due to
-                # weights[-1] = 0. Interestingly this crash doesn't happen with torch.compile enabled. Strange stuff.
-                # Anywho, the simple fix is to set a very low weight to this.
-                weights[-1] = 1e-6
-            else:
-                weights[-1] = 0
+        # if self.enable_deep_supervision:
+        #     deep_supervision_scales = self._get_deep_supervision_scales()
+        #     weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
+        #     if self.is_ddp and not self._do_i_compile():
+        #         # very strange and stupid interaction. DDP crashes and complains about unused parameters due to
+        #         # weights[-1] = 0. Interestingly this crash doesn't happen with torch.compile enabled. Strange stuff.
+        #         # Anywho, the simple fix is to set a very low weight to this.
+        #         weights[-1] = 1e-6
+        #     else:
+        #         weights[-1] = 0
 
-            # we don't use the lowest 2 outputs. Normalize weights so that they sum to 1
-            weights = weights / weights.sum()
-            # now wrap the loss
-            loss = DeepSupervisionWrapper(loss, weights)
+        #     # we don't use the lowest 2 outputs. Normalize weights so that they sum to 1
+        #     weights = weights / weights.sum()
+        #     # now wrap the loss
+        #     loss = DeepSupervisionWrapper(loss, weights)
 
-        return loss
+        return nn.MSELoss()
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
@@ -993,7 +995,18 @@ class nnUNetTrainer(object):
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             output = self.network(data)
             # del data
-            l = self.loss(output, target)
+            # print('ALIREZA--------------', data.shape)
+            # print('ALIREZA--------------', [yar.shape for yar in output])
+            # print('ALIREZA--------------', [yar.shape for yar in target])
+            # plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            # plt.savefig('/content/1.png')
+            # plt.imshow(output[1].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            # plt.savefig('/content/11.png')
+            # plt.imshow(output[2].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            # plt.savefig('/content/111.png')
+            # plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            # plt.savefig('/content/2.png')
+            l = self.loss(output[0], data)
 
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
@@ -1025,6 +1038,7 @@ class nnUNetTrainer(object):
     def validation_step(self, batch: dict) -> dict:
         data = batch['data']
         target = batch['target']
+        print(batch.keys())
 
         data = data.to(self.device, non_blocking=True)
         if isinstance(target, list):
@@ -1038,8 +1052,12 @@ class nnUNetTrainer(object):
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             output = self.network(data)
-            del data
-            l = self.loss(output, target)
+            plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 2], cmap='gray')
+            plt.savefig(f'data_epoch{self.current_epoch + 1}')
+            plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 2], cmap='gray')
+            plt.savefig(f'output_epoch{self.current_epoch + 1}')
+            l = self.loss(output[0], data)
+            # del data
 
         # we only need the output with the highest output resolution (if DS enabled)
         if self.enable_deep_supervision:
@@ -1138,13 +1156,13 @@ class nnUNetTrainer(object):
         # handling periodic checkpointing
         current_epoch = self.current_epoch
         if (current_epoch + 1) % self.save_every == 0 and current_epoch != (self.num_epochs - 1):
-            self.save_checkpoint(join(self.output_folder, 'checkpoint_latest.pth'))
+            self.save_checkpoint(join(self.output_folder, f'checkpoint_{current_epoch + 1}.pth'))
 
         # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
-        if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
-            self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
-            self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
-            self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
+        # if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
+        #     self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
+        #     self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
+        #     self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
 
         if self.local_rank == 0:
             self.logger.plot_progress_png(self.output_folder)
@@ -1366,14 +1384,18 @@ class nnUNetTrainer(object):
 
             self.on_train_epoch_start()
             train_outputs = []
-            for batch_id in range(self.num_iterations_per_epoch):
+            for batch_id in tqdm(range(self.num_iterations_per_epoch)):
+                if batch_id == 1:
+                      break
                 train_outputs.append(self.train_step(next(self.dataloader_train)))
             self.on_train_epoch_end(train_outputs)
 
             with torch.no_grad():
                 self.on_validation_epoch_start()
                 val_outputs = []
-                for batch_id in range(self.num_val_iterations_per_epoch):
+                for batch_id in tqdm(range(self.num_val_iterations_per_epoch)):
+                    if batch_id == 1:
+                      break
                     val_outputs.append(self.validation_step(next(self.dataloader_val)))
                 self.on_validation_epoch_end(val_outputs)
 
