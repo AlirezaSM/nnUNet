@@ -152,7 +152,7 @@ class nnUNetTrainer(object):
         self.oversample_foreground_percent = 0.33
         self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
-        self.num_epochs = 1000
+        self.num_epochs = 50
         self.current_epoch = 0
         self.enable_deep_supervision = True
 
@@ -996,17 +996,13 @@ class nnUNetTrainer(object):
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             output = self.network(data)
             # del data
-            # print('ALIREZA--------------', data.shape)
-            # print('ALIREZA--------------', [yar.shape for yar in output])
-            # print('ALIREZA--------------', [yar.shape for yar in target])
-            # plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
-            # plt.savefig('/content/1.png')
-            # plt.imshow(output[1].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
-            # plt.savefig('/content/11.png')
-            # plt.imshow(output[2].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
-            # plt.savefig('/content/111.png')
-            # plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
-            # plt.savefig('/content/2.png')
+            imgs_dir = '../imgs/'  # Root directory to save the error maps
+            os.makedirs(imgs_dir, exist_ok=True)  # Ensure the directory exists
+            plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            plt.savefig(f'../imgs/output_{self.current_epoch + 1}.png')
+            plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            plt.savefig(f'../imgs/input_{self.current_epoch + 1}.png')
+            
             l = self.loss(output[0], data)
 
         if self.grad_scaler is not None:
@@ -1041,7 +1037,7 @@ class nnUNetTrainer(object):
         data = batch['data']  # shape [7, 1, 192, 256, 16]
         target = batch['target']
         keys = batch['keys']  # keys used for naming files
-        csv_df = pd.read_csv("nnUNet_raw/Dataset100_T1/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
+        csv_df = pd.read_csv("../nnUNet_raw/Dataset100_T1/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
         labels = list()
 
         # Get labels for the batch
@@ -1066,7 +1062,7 @@ class nnUNetTrainer(object):
 
             # Save the MAE for each instance as a .npy file with the name based on batch['keys']
             mae_np = mae.detach().cpu().numpy()  # Convert to numpy array
-            output_dir = '/content/error_maps/'  # Root directory to save the error maps
+            output_dir = '../error_maps/'  # Root directory to save the error maps
             os.makedirs(output_dir, exist_ok=True)  # Ensure the directory exists
 
             # Save each MAE map to a separate file using keys
@@ -1448,7 +1444,7 @@ class nnUNetTrainer(object):
             self.on_train_epoch_start()
             train_outputs = []
             for batch_id in tqdm(range(self.num_iterations_per_epoch)):
-                # if batch_id == 1:
+                # if batch_id == 10:
                 #       break
                 train_outputs.append(self.train_step(next(self.dataloader_train)))
             self.on_train_epoch_end(train_outputs)
@@ -1457,7 +1453,7 @@ class nnUNetTrainer(object):
                 self.on_validation_epoch_start()
                 val_outputs = []
                 for batch_id in tqdm(range(self.num_val_iterations_per_epoch)):
-                    # if batch_id == 1:
+                    # if batch_id == 10:
                     #   break
                     val_outputs.append(self.validation_step(next(self.dataloader_val)))
                 self.on_validation_epoch_end(val_outputs)
