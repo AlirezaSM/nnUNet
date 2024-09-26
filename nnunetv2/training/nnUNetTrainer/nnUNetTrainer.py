@@ -996,12 +996,12 @@ class nnUNetTrainer(object):
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             output = self.network(data)
             # del data
-            imgs_dir = '../imgs/'  # Root directory to save the error maps
-            os.makedirs(imgs_dir, exist_ok=True)  # Ensure the directory exists
-            plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
-            plt.savefig(f'../imgs/output_{self.current_epoch + 1}.png')
-            plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
-            plt.savefig(f'../imgs/input_{self.current_epoch + 1}.png')
+            # imgs_dir = '../imgs/'  # Root directory to save the error maps
+            # os.makedirs(imgs_dir, exist_ok=True)  # Ensure the directory exists
+            # plt.imshow(output[0].detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            # plt.savefig(f'../imgs/output_{self.current_epoch + 1}.png')
+            # plt.imshow(data.detach().cpu().numpy()[0, 0, :, :, 0], cmap='gray')
+            # plt.savefig(f'../imgs/input_{self.current_epoch + 1}.png')
             
             l = self.loss(output[0], data)
 
