@@ -1037,7 +1037,7 @@ class nnUNetTrainer(object):
         data = batch['data']  # shape [7, 1, 192, 256, 16]
         target = batch['target']
         keys = batch['keys']  # keys used for naming files
-        csv_df = pd.read_csv("../nnUNet_raw/Dataset100_T1/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
+        csv_df = pd.read_csv("../nnUNet_raw/Dataset100_T2/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
         labels = list()
 
         # Get labels for the batch
