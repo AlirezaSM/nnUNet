@@ -423,7 +423,7 @@ class nnUNetTrainer(object):
         #     # now wrap the loss
         #     loss = DeepSupervisionWrapper(loss, weights)
 
-        return nn.L1Loss()
+        return nn.MSELoss()
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
@@ -1037,7 +1037,7 @@ class nnUNetTrainer(object):
         data = batch['data']  # shape [7, 1, 192, 256, 16]
         target = batch['target']
         keys = batch['keys']  # keys used for naming files
-        csv_df = pd.read_csv("../nnUNet_raw/Dataset100_FLAIR/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
+        csv_df = pd.read_csv("../nnUNet_raw/Dataset100_T2/labelsTr/output_case_labels.csv")  # Replace with the actual path to your CSV file
         labels = list()
 
         # Get labels for the batch
